@@ -1,88 +1,84 @@
-# LLM + MCP + RAG (Python版本)
-python
+# MCP客户端
 
-## 目标
+这是一个用于与Model Control Protocol (MCP)交互的Python客户端实现。
 
-本项目演示了如何使用 Python 构建一个结合了多个 MCP (Model Context Protocol) 客户端的 Agent，并在此基础上进行 RAG (Retrieval-Augmented Generation) 操作。
-
-## **The augmented LLM**
-
-- [Building Effective Agents](https://www.anthropic.com/engineering/building-effective-agents)
-
-## **依赖**
+## 安装
 
 ```bash
-# 使用uv进行环境隔离
-pip install uv
-uv venv
-source .venv/bin/activate  # Linux/MacOS
-# .venv\Scripts\activate    # Windows
-
-# 安装依赖
-uv pip install -r requirements.txt
+pip install -e .
 ```
-
-## LLM
-
-- [OpenAI API](https://platform.openai.com/docs/api-reference/chat)
-
-## MCP
-
-- [MCP 架构](https://modelcontextprotocol.io/docs/concepts/architecture)
-- [MCP Client](https://modelcontextprotocol.io/quickstart/client)
-- [Fetch MCP](https://github.com/modelcontextprotocol/servers/tree/main/src/fetch)
-- [Filesystem MCP](https://github.com/modelcontextprotocol/servers/tree/main/src/filesystem)
-
-## RAG
-
-- [Retrieval Augmented Generation](https://scriv.ai/guides/retrieval-augmented-generation-overview/)
-    - 译文: https://www.yuque.com/serviceup/misc/cn-retrieval-augmented-generation-overview
-- 各种Loaders: https://python.langchain.com/docs/integrations/document_loaders/
-- [硅基流动](https://cloud.siliconflow.cn/models)
-    - 邀请码： **x771DtAF**
-- [json数据](https://jsonplaceholder.typicode.com/)
-
-## 向量
-
-- 维度
-- 模长
-- 点乘 Dot Product
-    - 对应位置元素的积，求和
-- 余弦相似度 cos
-    - 1 → 方向完全一致
-    - 0 → 垂直
-    - -1 → 完全想法
 
 ## 使用方法
 
-1. 准备环境
-   ```bash
-   # 复制示例环境配置文件并修改为你的配置
-   cp .env.example .env
-   # 编辑.env文件，填入你的API密钥
-   ```
+### 初始化客户端
 
-2. 运行示例
-   ```bash
-   python src/main.py
-   ```
+```python
+from mcp_client import MCPClient
 
-## 项目结构
-
+# 创建客户端实例
+client = MCPClient(
+    api_key="your_api_key_here",
+    base_url="https://api.anthropic.com",
+    model="claude-3-haiku-20240307"
+)
 ```
-llm-mcp-rag-python/
-├── .env.example        # 环境变量示例
-├── requirements.txt    # 项目依赖
-├── README.md           # 项目说明
-├── src/                # 源代码
-│   ├── main.py         # 入口文件
-│   ├── agent.py        # Agent类
-│   ├── chat_openai.py  # ChatOpenAI类
-│   ├── embedding_retriever.py # EmbeddingRetriever类
-│   ├── mcp_client.py   # MCPClient类
-│   ├── vector_store.py # VectorStore类
-│   └── utils.py        # 工具函数
-├── knowledge/          # 知识库文件
-├── output/             # 输出结果
-└── images/             # 图片资源
+
+### 生成文本
+
+```python
+# 同步方式调用
+response = client.generate(
+    messages=[
+        {"role": "user", "content": "你好，请介绍一下自己。"}
+    ],
+    max_tokens=1000
+)
+print(response)
+
+# 异步方式调用
+async def generate_async():
+    response = await client.generate_async(
+        messages=[
+            {"role": "user", "content": "你好，请介绍一下自己。"}
+        ],
+        max_tokens=1000
+    )
+    print(response)
+
+# 流式响应
+for chunk in client.generate_stream(
+    messages=[
+        {"role": "user", "content": "你好，请介绍一下自己。"}
+    ],
+    max_tokens=1000
+):
+    print(chunk, end="", flush=True)
+
+# 异步流式响应
+async def generate_stream_async():
+    async for chunk in client.generate_stream_async(
+        messages=[
+            {"role": "user", "content": "你好，请介绍一下自己。"}
+        ],
+        max_tokens=1000
+    ):
+        print(chunk, end="", flush=True)
 ```
+
+### 关闭客户端
+
+```python
+# 关闭客户端，释放资源
+client.close()
+
+# 在异步环境中关闭客户端
+await client.aclose()
+```
+
+## 参数说明
+
+- `api_key`: Anthropic API密钥
+- `base_url`: API基础URL，默认为Anthropic API
+- `model`: 使用的模型名称，默认为"claude-3-haiku-20240307"
+- `timeout`: 请求超时时间（秒）
+- `max_retries`: 最大重试次数
