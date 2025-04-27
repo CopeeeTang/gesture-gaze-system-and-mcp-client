@@ -1,0 +1,24 @@
+# Base requirements
+python-dotenv
+
+# LLM specific
+transformers>=4.38.0
+torch>=2.0.0
+sentencepiece
+accelerate
+openai>=1.0.0
+flash-attn>=2.0.0  # 支持Phi4的flash attention优化
+cuda-python  # CUDA支持
+
+
+# Input device specific 
+opencv-python # For VST/Image processing
+pillow # For image handling
+
+# MCP Client specific
+requests
+
+# Other utilities
+numpy
+scikit-learn # For embeddings/vector stores
+faiss-cpu # For vector store
