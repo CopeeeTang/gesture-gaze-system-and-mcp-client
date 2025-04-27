@@ -1,270 +1,253 @@
 import json
-import asyncio
-import websockets
-import nest_asyncio
-from typing import Dict, List, Any, Optional, Callable, Awaitable, Union
-from uuid import uuid4
+import os
+import time
+from typing import Any, Dict, List, Optional, Union, Callable
 
-# 应用nest_asyncio以便在Jupyter等环境中支持asyncio
-nest_asyncio.apply()
+import httpx
+
+from .mcp_settings import MCPSettings, ModelSettings, SystemRole
+
 
 class MCPClient:
-    """Model Context Protocol客户端实现"""
+    """Anthropic API客户端"""
     
-    def __init__(self, websocket_uri: str = "ws://localhost:8765"):
-        """初始化MCP客户端
+    def __init__(self, settings: Optional[MCPSettings] = None):
+        """
+        初始化客户端
         
         Args:
-            websocket_uri: WebSocket服务器URI
+            settings: 可选的MCPSettings实例。如果为None，将从配置文件加载
         """
-        self.websocket_uri = websocket_uri
-        self.websocket = None
-        self.is_connected = False
-        self.message_handlers = {}
-        self.response_futures = {}
-        self.stream_handlers = {}
-        self.heartbeat_task = None
-    
-    async def connect(self) -> bool:
-        """连接到MCP服务器
+        self.settings = settings or MCPSettings.from_config()
+        self._client = httpx.Client(timeout=120.0)
         
-        Returns:
-            bool: 连接是否成功
+        # 检查API密钥是否已设置
+        if not self.settings.api_key:
+            raise ValueError("API密钥未设置。请设置环境变量ANTHROPIC_API_KEY或在配置文件中提供api_key")
+    
+    def _prepare_headers(self) -> Dict[str, str]:
+        """准备请求头"""
+        return {
+            "Content-Type": "application/json",
+            "x-api-key": self.settings.api_key,
+            "anthropic-version": "2023-06-01"
+        }
+    
+    def _prepare_messages(self, 
+                        prompt: str, 
+                        system_prompt: Optional[str] = None,
+                        history: Optional[List[Dict[str, str]]] = None) -> List[Dict[str, str]]:
         """
+        准备消息列表
+        
+        Args:
+            prompt: 主提示词
+            system_prompt: 系统提示词，如果为None则使用模型默认设置
+            history: 历史消息列表
+            
+        Returns:
+            消息列表
+        """
+        messages = []
+        
+        # 添加系统消息
+        if system_prompt:
+            messages.append({
+                "role": self.settings.system_role.value,
+                "content": system_prompt
+            })
+        
+        # 添加历史消息
+        if history:
+            messages.extend(history)
+        
+        # 添加用户消息
+        messages.append({
+            "role": "user",
+            "content": prompt
+        })
+        
+        return messages
+    
+    def _send_request(self, 
+                    model_name: str, 
+                    messages: List[Dict[str, str]], 
+                    stream: bool = False,
+                    temperature: Optional[float] = None,
+                    top_p: Optional[float] = None,
+                    max_tokens: Optional[int] = None) -> Dict[str, Any]:
+        """
+        发送请求到Anthropic API
+        
+        Args:
+            model_name: 模型名称
+            messages: 消息列表
+            stream: 是否使用流式响应
+            temperature: 温度
+            top_p: top-p值
+            max_tokens: 最大标记数
+            
+        Returns:
+            API响应
+        """
+        model_settings = self.settings.models.get(model_name)
+        if not model_settings:
+            model_settings = ModelSettings(name=model_name)
+        
+        payload = {
+            "model": model_name,
+            "messages": messages,
+            "stream": stream,
+            "temperature": temperature if temperature is not None else model_settings.temperature,
+            "top_p": top_p if top_p is not None else model_settings.top_p,
+            "max_tokens": max_tokens if max_tokens is not None else model_settings.max_tokens
+        }
+        
+        headers = self._prepare_headers()
+        
         try:
-            self.websocket = await websockets.connect(self.websocket_uri)
-            self.is_connected = True
-            print(f"已连接到MCP服务器: {self.websocket_uri}")
-            
-            # 启动消息处理循环
-            asyncio.create_task(self._message_handler())
-            
-            # 启动心跳
-            self.heartbeat_task = asyncio.create_task(self._heartbeat_loop())
-            
-            return True
-        except Exception as e:
-            print(f"连接MCP服务器失败: {e}")
-            self.is_connected = False
-            return False
-    
-    async def disconnect(self) -> None:
-        """断开与MCP服务器的连接"""
-        if self.is_connected and self.websocket:
-            # 取消心跳任务
-            if self.heartbeat_task:
-                self.heartbeat_task.cancel()
-                self.heartbeat_task = None
-            
-            await self.websocket.close()
-            self.websocket = None
-            self.is_connected = False
-            print("已断开与MCP服务器的连接")
-    
-    async def call_tool(self, 
-                         tool_name: str, 
-                         parameters: Dict[str, Any],
-                         timeout: float = 60) -> Dict[str, Any]:
-        """调用MCP工具并等待结果
-        
-        Args:
-            tool_name: 工具名称
-            parameters: 工具参数
-            timeout: 超时时间（秒）
-            
-        Returns:
-            Dict[str, Any]: 工具调用结果
-            
-        Raises:
-            TimeoutError: 如果调用超时
-            ConnectionError: 如果未连接到服务器
-        """
-        if not self.is_connected or not self.websocket:
-            raise ConnectionError("未连接到MCP服务器")
-        
-        # 生成请求ID
-        request_id = str(uuid4())
-        
-        # 创建请求消息
-        message = {
-            "type": "tool_call",
-            "request_id": request_id,
-            "tool_name": tool_name,
-            "parameters": parameters
-        }
-        
-        # 创建Future对象用于等待响应
-        future = asyncio.Future()
-        self.response_futures[request_id] = future
-        
-        # 发送请求
-        await self.websocket.send(json.dumps(message))
-        
-        try:
-            # 等待响应，设置超时
-            response = await asyncio.wait_for(future, timeout)
-            return response
-        except asyncio.TimeoutError:
-            # 超时时从响应futures中移除
-            self.response_futures.pop(request_id, None)
-            raise TimeoutError(f"工具调用超时: {tool_name}")
-        finally:
-            # 确保从响应futures中移除
-            self.response_futures.pop(request_id, None)
-    
-    async def stream_tool_calls(self, 
-                              tool_name: str, 
-                              parameters: Dict[str, Any],
-                              handler: Callable[[str, Any], Awaitable[None]]) -> str:
-        """流式调用MCP工具
-        
-        Args:
-            tool_name: 工具名称
-            parameters: 工具参数
-            handler: 处理流式响应的回调函数，接收stream_id和数据
-            
-        Returns:
-            str: 流ID，可用于取消流
-            
-        Raises:
-            ConnectionError: 如果未连接到服务器
-        """
-        if not self.is_connected or not self.websocket:
-            raise ConnectionError("未连接到MCP服务器")
-        
-        # 生成流ID
-        stream_id = str(uuid4())
-        
-        # 创建请求消息
-        message = {
-            "type": "stream_tool_call",
-            "stream_id": stream_id,
-            "tool_name": tool_name,
-            "parameters": parameters
-        }
-        
-        # 注册流处理程序
-        self.stream_handlers[stream_id] = handler
-        
-        # 发送请求
-        await self.websocket.send(json.dumps(message))
-        return stream_id
-    
-    async def cancel_stream(self, stream_id: str) -> bool:
-        """取消流式工具调用
-        
-        Args:
-            stream_id: 流ID
-            
-        Returns:
-            bool: 取消是否成功
-        """
-        if not self.is_connected or not self.websocket:
-            return False
-        
-        # 创建取消消息
-        message = {
-            "type": "cancel_stream",
-            "stream_id": stream_id
-        }
-        
-        # 发送请求
-        await self.websocket.send(json.dumps(message))
-        
-        # 移除流处理程序
-        self.stream_handlers.pop(stream_id, None)
-        return True
-    
-    async def send_heartbeat(self) -> None:
-        """发送心跳消息以保持连接"""
-        if self.is_connected and self.websocket:
-            message = {
-                "type": "heartbeat"
-            }
-            await self.websocket.send(json.dumps(message))
-    
-    async def _heartbeat_loop(self) -> None:
-        """心跳循环任务"""
-        while self.is_connected and self.websocket:
-            await self.send_heartbeat()
-            await asyncio.sleep(30)  # 每30秒发送一次心跳
-    
-    async def _message_handler(self) -> None:
-        """处理来自服务器的消息"""
-        while self.is_connected and self.websocket:
+            response = self._client.post(
+                f"{self.settings.api_url}/v1/messages",
+                headers=headers,
+                json=payload
+            )
+            response.raise_for_status()
+            return response.json()
+        except httpx.HTTPStatusError as e:
+            error_info = ""
             try:
-                # 接收消息
-                message_str = await self.websocket.recv()
-                message = json.loads(message_str)
-                
-                # 根据消息类型处理
-                message_type = message.get("type")
-                
-                if message_type == "tool_response":
-                    # 处理工具响应
-                    request_id = message.get("request_id")
-                    if request_id in self.response_futures:
-                        future = self.response_futures[request_id]
-                        if not future.done():
-                            future.set_result(message.get("result"))
-                
-                elif message_type == "stream_data":
-                    # 处理流数据
-                    stream_id = message.get("stream_id")
-                    if stream_id in self.stream_handlers:
-                        handler = self.stream_handlers[stream_id]
-                        await handler(stream_id, message.get("data"))
-                
-                elif message_type == "stream_end":
-                    # 处理流结束
-                    stream_id = message.get("stream_id")
-                    self.stream_handlers.pop(stream_id, None)
-                
-                elif message_type == "error":
-                    # 处理错误
-                    request_id = message.get("request_id")
-                    if request_id in self.response_futures:
-                        future = self.response_futures[request_id]
-                        if not future.done():
-                            future.set_exception(Exception(message.get("error")))
-                    # 如果是流错误，可能还需要额外处理
-                
-                elif message_type == "heartbeat_ack":
-                    # 心跳确认，可以记录但不需要特殊处理
-                    pass
-                
-            except websockets.exceptions.ConnectionClosed:
-                # 连接关闭，断开客户端
-                self.is_connected = False
-                self.websocket = None
-                print("与MCP服务器的连接已关闭")
-                break
-            except Exception as e:
-                print(f"处理消息时出错: {e}")
+                error_info = e.response.json()
+            except:
+                error_info = e.response.text
+            
+            raise Exception(f"API请求失败: {e.response.status_code} - {error_info}")
+        except Exception as e:
+            raise Exception(f"请求出错: {str(e)}")
     
-    # 实用方法
-    def is_tool_available(self, tool_name: str) -> bool:
-        """检查工具是否可用
+    def _handle_stream_response(self, 
+                              response: httpx.Response, 
+                              callback: Optional[Callable[[str], None]] = None) -> str:
+        """
+        处理流式响应
         
         Args:
-            tool_name: 工具名称
+            response: HTTP响应
+            callback: 处理每个部分响应的回调函数
             
         Returns:
-            bool: 工具是否可用
+            完整响应文本
         """
-        # 这里可以实现工具可用性检查，例如缓存可用工具列表
-        # 简单实现，始终返回True
-        return True
-    
-    async def get_available_tools(self) -> List[str]:
-        """获取可用工具列表
+        full_text = ""
         
-        Returns:
-            List[str]: 可用工具名称列表
-        """
         try:
-            result = await self.call_tool("mcp_system_list_tools", {})
-            return result.get("tools", [])
+            for line in response.iter_lines():
+                if not line or line.startswith(b":"):
+                    continue
+                
+                if line.startswith(b"data: "):
+                    data_str = line[6:].decode("utf-8")
+                    if data_str.strip() == "[DONE]":
+                        break
+                    
+                    try:
+                        data = json.loads(data_str)
+                        if "content" in data and len(data["content"]) > 0:
+                            delta = data["content"][0].get("text", "")
+                            full_text += delta
+                            
+                            if callback:
+                                callback(delta)
+                    except json.JSONDecodeError:
+                        pass
         except Exception as e:
-            print(f"获取可用工具列表失败: {e}")
-            return []
+            raise Exception(f"处理流式响应出错: {str(e)}")
+        
+        return full_text
+    
+    def generate(self,
+               prompt: str,
+               model_name: Optional[str] = None,
+               system_prompt: Optional[str] = None,
+               history: Optional[List[Dict[str, str]]] = None,
+               stream: bool = False,
+               temperature: Optional[float] = None,
+               top_p: Optional[float] = None,
+               max_tokens: Optional[int] = None,
+               callback: Optional[Callable[[str], None]] = None) -> str:
+        """
+        生成文本响应
+        
+        Args:
+            prompt: 提示词
+            model_name: 模型名称，如果为None则使用默认模型
+            system_prompt: 系统提示词，如果为None则使用模型默认设置
+            history: 历史消息列表
+            stream: 是否使用流式响应
+            temperature: 温度
+            top_p: top-p值
+            max_tokens: 最大标记数
+            callback: 处理流式响应的回调函数
+            
+        Returns:
+            生成的文本响应
+        """
+        model_name = model_name or self.settings.default_model
+        messages = self._prepare_messages(prompt, system_prompt, history)
+        
+        # 如果使用流式响应
+        if stream:
+            headers = self._prepare_headers()
+            model_settings = self.settings.models.get(model_name, ModelSettings(name=model_name))
+            
+            payload = {
+                "model": model_name,
+                "messages": messages,
+                "stream": True,
+                "temperature": temperature if temperature is not None else model_settings.temperature,
+                "top_p": top_p if top_p is not None else model_settings.top_p,
+                "max_tokens": max_tokens if max_tokens is not None else model_settings.max_tokens
+            }
+            
+            try:
+                with self._client.stream(
+                    "POST",
+                    f"{self.settings.api_url}/v1/messages",
+                    headers=headers,
+                    json=payload,
+                    timeout=300.0
+                ) as response:
+                    response.raise_for_status()
+                    return self._handle_stream_response(response, callback)
+            except httpx.HTTPStatusError as e:
+                error_info = ""
+                try:
+                    error_info = e.response.json()
+                except:
+                    error_info = e.response.text
+                
+                raise Exception(f"API请求失败: {e.response.status_code} - {error_info}")
+            except Exception as e:
+                raise Exception(f"请求出错: {str(e)}")
+        
+        # 非流式响应
+        response = self._send_request(
+            model_name=model_name,
+            messages=messages,
+            stream=False,
+            temperature=temperature,
+            top_p=top_p,
+            max_tokens=max_tokens
+        )
+        
+        return response["content"][0]["text"]
+    
+    def close(self):
+        """关闭客户端"""
+        if self._client:
+            self._client.close()
+    
+    def __enter__(self):
+        return self
+    
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
