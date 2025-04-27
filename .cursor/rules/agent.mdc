@@ -1,0 +1,31 @@
+你需要在@Gesture_gaze_system 文件夹下创建一个新的项目，实现一个基于手势和眼动数据调用大模型进行意图识别，请保证调用格式的规范，使用.env，gitignore，requirements,readme.run.sh进行规范的代码管理
+调用对应的mcp工具的端侧AGENT项目，该项目应该参考@mcp-client-tx 项目进行实现
+文件夹整体上可以分为 
+1.llm/{llm_name.py} 包括端侧部署的能调用工具大模型(目前需要部署phi4，qwen2.5 omin)和调用API实现的大模型如(GPT,Claude),每个大模型部署的对话单独设置一个python文件
+-qwem端侧部署参考https://huggingface.co/docs/transformers/main/en/model_doc/qwen2_5_omni#transformers.Qwen2_5OmniModel 
+-phi4端侧部署参考https://huggingface.co/microsoft/Phi-4-multimodal-instruct
+phi4我已经在本地文件夹部署成功 @phi4
+-调用API实现的大模型文件可以参考 [chat_openai.py](mdc:mcp-client-tx/src/chat_openai.py)的格式
+你还需要需要考虑function call功能的集成，phi4的function calling只能用system prompt实现，具体可参考@xeo-app/backend/phi_intent.py 以及 https://techcommunity.microsoft.com/blog/educatordeveloperblog/building-ai-agents-on-edge-devices-using-ollama--phi-4-mini-function-calling/4391029
+qwen2.5omin可以参考@https://qwen.readthedocs.io/en/latest/framework/function_call.html
+
+2.Agent
+重点是处理交互逻辑的部分，连接了llm端及mcp端和前端，目前仅实现了根据prompt调用工具执行任务的交互流程 [Agent.py](mdc:mcp-client-tx/src/Agent.py) 你需要添加以下功能：1.实现多轮对话的功能，允许用户输入 2.添加
+
+3.输入设备连接
+输入应该包括四种，一个是当前交互页面的VST图像，一个是手势，一个是眼动，最后一个是语音。
+-手势连接腕带采集固定手势，文本类型，现阶段先将连接设备部分空出来，返回'pinch，double pinch，grip，twist left，twist right，thumb up，thumb down'之一
+-眼动数据位(x,y,r):（以(x,y)为圆心，半径为r的方块区域）
+-数字页面图像（VST图像）
+
+4.MCPClient
+可以直接复用[MCPClient.py](mdc:mcp-client-tx/src/MCPClient.py) 连接到不同的mcp server，返回不同的工具
+
+5.scene
+@xeo-app 的实现，包括不同的使用场景，即不同的前端应用场景，目前仅有一个
+
+6.utils
+存放一些额外的功能函数，如格式 [utils.py](mdc:mcp-client-tx/src/utils.py) [embedding_retriever.py](mdc:mcp-client-tx/src/embedding_retriever.py) [vector_store.py](mdc:mcp-client-tx/src/vector_store.py)
+
+7.main
+主流程使用parse-arguments 传入输入的参数如调用的模型，使用的场景
